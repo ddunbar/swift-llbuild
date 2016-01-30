@@ -1,0 +1,50 @@
+sudo: required
+dist: trusty
+
+language: cpp
+
+compiler: clang
+
+cache: apt
+before_install:
+  # Hide Travis's default Clang installation.
+  - sudo rm -rf /usr/local/clang-*
+    
+  # Install clang, and make the default.
+  - sudo apt-get update
+  - sudo apt-get install -y clang-3.6
+  - sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-3.6 20
+  - sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-3.6 20
+
+  # Install lit
+  - sudo pip install lit
+
+  # Install pre-built FileCheck. This is gross.
+  - sudo wget -O /usr/local/bin/FileCheck http://minormatter.com/ddunbar/FileCheck
+  - sudo chmod +x /usr/local/bin/FileCheck
+
+  # Re-check clang version.
+  - hash -r
+  - which clang
+  - clang --version
+
+before_script:
+  # Set up build directory
+  - export SRCROOT=`pwd`
+  - mkdir build
+  - cd build/
+  # Configure CMake to use Clang.
+  - cmake .. -DCMAKE_C_COMPILER:=clang -DCMAKE_CXX_COMPILER:=clang++ "-DLLBUILD_LIT_ARGS:=--no-progress-bar -v"
+
+script:
+  # We currently run tests several times, to attempt and detect flaky tests early.
+  - make test
+  - make test
+  - make test
+  - make test
+  - make test
+  - make test
+  - make test
+  - make test
+  - make test
+  - make test
