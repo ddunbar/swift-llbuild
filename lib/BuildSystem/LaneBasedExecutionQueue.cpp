@@ -73,8 +73,12 @@ class LaneBasedExecutionQueue : public BuildExecutionQueue {
   /// Management of cancellation and SIGKILL escalation
   std::unique_ptr<std::thread> killAfterTimeoutThread = nullptr;
   std::atomic<bool> cancelled { false };
-  std::condition_variable stopKillingCondition;
-  std::mutex stopKillingMutex;
+  std::condition_variable queueCompleteCondition;
+  std::mutex queueCompleteMutex;
+  std::atomic<bool> queueComplete { false };
+  std::condition_variable threadStartedCondition;
+  std::mutex threadStartedMutex;
+  std::atomic<bool> threadStarted { false };
 
   void executeLane(unsigned laneNumber) {
     // Set the thread name, if available.
@@ -123,9 +127,15 @@ class LaneBasedExecutionQueue : public BuildExecutionQueue {
   }
 
   void killAfterTimeout() {
-    std::unique_lock<std::mutex> lock(stopKillingMutex);
-    stopKillingCondition.wait_for(lock, std::chrono::seconds(10));
-    sendSignalToProcesses(SIGKILL);
+    std::unique_lock<std::mutex> lock(queueCompleteMutex);
+
+    threadStarted = true;
+    threadStartedCondition.notify_all();
+
+    if (!queueComplete) {
+      queueCompleteCondition.wait_for(lock, std::chrono::seconds(10));
+      sendSignalToProcesses(SIGKILL);
+    }
   }
 
   void sendSignalToProcesses(int signal) {
@@ -159,7 +169,15 @@ public:
     }
 
     if (killAfterTimeoutThread) {
-      stopKillingCondition.notify_all();
+      queueComplete = true;
+
+      // Make sure we do not notify the thread before it has even started
+      std::unique_lock<std::mutex> lock(threadStartedMutex);
+      if (!threadStarted) {
+        threadStartedCondition.wait(lock);
+      }
+
+      queueCompleteCondition.notify_all();
       killAfterTimeoutThread->join();
     }
   }
@@ -203,7 +221,6 @@ public:
 
     LaneBasedExecutionQueueJobContext& context =
       *reinterpret_cast<LaneBasedExecutionQueueJobContext*>(opaqueContext);
-    getDelegate().commandProcessStarted(context.job.getForCommand(), handle);
     
     // Initialize the spawn attributes.
     posix_spawnattr_t attributes;
@@ -264,6 +281,7 @@ public:
     int outputPipe[2]{ -1, -1 };
     if (shouldCaptureOutput) {
       if (::pipe(outputPipe) < 0) {
+        getDelegate().commandProcessStarted(context.job.getForCommand(), handle);
         getDelegate().commandProcessHadError(
             context.job.getForCommand(), handle,
             Twine("unable to open output pipe (") + strerror(errno) + ")");
@@ -337,6 +355,7 @@ public:
       if (posix_spawn(&pid, args[0], /*file_actions=*/&fileActions,
                       /*attrp=*/&attributes, const_cast<char**>(args.data()),
                       envp) != 0) {
+        getDelegate().commandProcessStarted(context.job.getForCommand(), handle);
         getDelegate().commandProcessHadError(
             context.job.getForCommand(), handle,
             Twine("unable to spawn process (") + strerror(errno) + ")");
@@ -346,6 +365,7 @@ public:
       }
 
       spawnedProcesses.insert(pid);
+      getDelegate().commandProcessStarted(context.job.getForCommand(), handle);
     }
 
     posix_spawn_file_actions_destroy(&fileActions);
