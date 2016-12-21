@@ -18,17 +18,24 @@
 
 #include "gtest/gtest.h"
 
+#include <condition_variable>
+#include <mutex>
+
 using namespace llbuild;
 using namespace llbuild::buildsystem;
 
 namespace {
+  std::condition_variable condition;
+
   class DummyDelegate : public BuildExecutionQueueDelegate {
   public:
     DummyDelegate() {}
 
     virtual void commandJobStarted(Command* command) override {}
     virtual void commandJobFinished(Command* command) override {}
-    virtual void commandProcessStarted(Command* command, ProcessHandle handle) override {}
+    virtual void commandProcessStarted(Command* command, ProcessHandle handle) override {
+      condition.notify_all();
+    }
     virtual void commandProcessHadError(Command* command, ProcessHandle handle, const Twine& message) override {}
     virtual void commandProcessHadOutput(Command* command, ProcessHandle handle, StringRef data) override {}
     virtual void commandProcessFinished(Command* command, ProcessHandle handle, int exitStatus) override {}
@@ -45,7 +52,11 @@ namespace {
     };
 
     queue->addJob(QueueJob((Command*)0x1, fn));
-    ::usleep(10); // there's a tiny race, until executeProcess() has called executeCommand()
+
+    // Wait until commandProcessStarted() has been called
+    std::mutex mutex;
+    std::unique_lock<std::mutex> lock(mutex);
+    condition.wait(lock);
 
     queue->cancelAllJobs();
     queue.reset();
