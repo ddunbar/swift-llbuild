@@ -64,7 +64,7 @@ class BuildValue(object):
     
     kinds = [
         "Invalid",
-        "VirtualInput", "ExistingInput", "MissingInput",
+        "VirtualInput", "ExistingInput", "ExistingLink", "MissingInput",
         "DirectoryContents", "DirectoryTreeSignature",
         "MissingOutput", "FailedInput",
         "SuccessfulCommand", "FailedCommand",

@@ -133,10 +133,11 @@ class BuildSystemImpl : public BuildSystemCommandInterface {
   /// The internal schema version.
   ///
   /// Version History:
+  /// * 7: Added ExistingLink to BuildValue
   /// * 6: Added DirectoryContents to BuildKey
   /// * 5: Switch BuildValue to be BinaryCoding based
   /// * 4: Pre-history
-  static const uint32_t internalSchemaVersion = 6;
+  static const uint32_t internalSchemaVersion = 7;
   
   BuildSystem& buildSystem;
 

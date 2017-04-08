@@ -25,6 +25,7 @@ StringRef BuildValue::stringForKind(BuildValue::Kind kind) {
     CASE(Invalid);
     CASE(VirtualInput);
     CASE(ExistingInput);
+    CASE(ExistingLink);
     CASE(MissingInput);
     CASE(DirectoryContents);
     CASE(DirectoryTreeSignature);

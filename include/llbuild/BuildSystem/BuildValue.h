@@ -48,6 +48,9 @@ class BuildValue {
     /// A value produced by an existing input file.
     ExistingInput,
 
+    /// A value produced by an existing symbolic link.
+    ExistingLink,
+
     /// A value produced by a missing input file.
     MissingInput,
 
@@ -155,9 +158,9 @@ private:
     }
   }
   
-  /// Create a build value containing directory contents.
-  BuildValue(Kind kind, FileInfo directoryInfo, ArrayRef<std::string> values)
-      : BuildValue(kind, directoryInfo)
+  /// Create a build value containing file information and string values.
+  BuildValue(Kind kind, FileInfo info, ArrayRef<std::string> values)
+      : BuildValue(kind, info)
   {
     // Construct the concatenated data.
     uint64_t size = 0;
@@ -261,6 +264,11 @@ public:
     assert(!outputInfo.isMissing());
     return BuildValue(Kind::ExistingInput, outputInfo);
   }
+  static BuildValue makeExistingLink(FileInfo outputInfo,
+                                     std::string linkValue) {
+    return BuildValue(Kind::ExistingLink, outputInfo,
+                      llvm::makeArrayRef(linkValue));
+  }
   static BuildValue makeMissingInput() {
     return BuildValue(Kind::MissingInput);
   }
@@ -305,6 +313,7 @@ public:
   bool isInvalid() const { return kind == Kind::Invalid; }
   bool isVirtualInput() const { return kind == Kind::VirtualInput; }
   bool isExistingInput() const { return kind == Kind::ExistingInput; }
+  bool isExistingLink() const { return kind == Kind::ExistingLink; }
   bool isMissingInput() const { return kind == Kind::MissingInput; }
 
   bool isDirectoryContents() const { return kind == Kind::DirectoryContents; }
@@ -322,6 +331,11 @@ public:
   bool isCancelledCommand() const { return kind == Kind::CancelledCommand; }
   bool isSkippedCommand() const { return kind == Kind::SkippedCommand; }
   bool isTarget() const { return kind == Kind::Target; }
+
+  StringRef getLinkTarget() const {
+    assert(isDirectoryContents() && "invalid call for value kind");
+    return getStringListValues()[0];
+  }
 
   std::vector<StringRef> getDirectoryContents() const {
     assert(isDirectoryContents() && "invalid call for value kind");
