@@ -44,31 +44,37 @@ StringRef BuildValue::stringForKind(BuildValue::Kind kind) {
   
 void BuildValue::dump(raw_ostream& os) const {
   os << "BuildValue(" << stringForKind(kind);
-  if (kindHasCommandSignature()) {
-    os << ", signature=" << commandSignature;
+  switch (kind) {
+  case Kind::Invalid:
+  case Kind::VirtualInput:
+  case Kind::MissingInput:
+  case Kind::MissingOutput:
+  case Kind::FailedInput:
+  case Kind::FailedCommand:
+  case Kind::PropagatedFailureCommand:
+  case Kind::CancelledCommand:
+  case Kind::SkippedCommand:
+  case Kind::Target:
+    break;
+    
+  case Kind::ExistingInput: {
+    os << ", fileInfo=";
+    getExistingInputFileInfo().dump(os);
+    break;
+  }    
+  case Kind::ExistingLink: {
+    os << ", fileInfo=";
+    getExistingLinkFileInfo().dump(os);
+    os << ", target=\"";
+    os.write_escaped(getExistingLinkTarget());
+    os << "\"";
+    break;
   }
-  if (kindHasOutputInfo()) {
-    os << ", outputInfos=[";
-    for (unsigned i = 0; i != getNumOutputs(); ++i) {
-      auto& info = getNthOutputInfo(i);
-      if (i != 0) os << ", ";
-      if (info.isMissing()) {
-        os << "FileInfo{/*missing*/}";
-      } else {
-        os << "FileInfo{"
-           << "dev=" << info.device
-           << ", inode=" << info.inode
-           << ", mode=" << info.mode
-           << ", size=" << info.size
-           << ", modTime=(" << info.modTime.seconds
-           << ":" << info.modTime.nanoseconds << "}";
-      }
-    }
-    os << "]";
-  }
-  if (kindHasStringList()) {
-    std::vector<StringRef> values = getStringListValues();
-    os << ", values=[";
+  case Kind::DirectoryContents: {
+    os << ", fileInfo=";
+    getDirectoryContentsFileInfo().dump(os);
+    std::vector<StringRef> values = getDirectoryContents();
+    os << ", contents=[";
     for (unsigned i = 0; i != values.size(); ++i) {
       if (i != 0) os << ", ";
       os << '"';
@@ -76,6 +82,23 @@ void BuildValue::dump(raw_ostream& os) const {
       os << '"';
     }
     os << "]";
+    break;
+  }
+  case Kind::DirectoryTreeSignature: {
+    os << ", signature=" << getDirectoryTreeSignature();
+    break;
+  }
+  case Kind::SuccessfulCommand: {
+    os << ", signature=" << getSuccessfulCommandSignature();
+    os << ", outputs=[";
+    for (unsigned i = 0; i != getSuccessfulCommandNumOutputs(); ++i) {
+      auto& info = getSuccessfulCommandOutput(i);
+      if (i != 0) os << ", ";
+      info.dump(os);
+
+    }
+    os << "]";
+  }
   }
   os << ")";
 }

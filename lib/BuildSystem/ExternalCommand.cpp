@@ -123,7 +123,7 @@ getResultForOutput(Node* node, const BuildValue& value) {
       value.isCancelledCommand())
     return BuildValue::makeFailedInput();
   if (value.isSkippedCommand())
-      return BuildValue::makeSkippedCommand();
+    return BuildValue::makeSkippedCommand();
 
   // Otherwise, we should have a successful command -- return the actual
   // result for the output.
@@ -146,13 +146,7 @@ getResultForOutput(Node* node, const BuildValue& value) {
   assert(it != outputs.end());
     
   auto idx = it - outputs.begin();
-  assert(idx < value.getNumOutputs());
-
-  auto& info = value.getNthOutputInfo(idx);
-  if (info.isMissing())
-    return BuildValue::makeMissingOutput();
-    
-  return BuildValue::makeExistingInput(info);
+  return value.getSuccessfulCommandOutput(idx);
 }
   
 bool ExternalCommand::isResultValid(BuildSystem& system,
@@ -166,7 +160,7 @@ bool ExternalCommand::isResultValid(BuildSystem& system,
     return false;
     
   // If the command's signature has changed since it was built, rebuild.
-  if (value.getCommandSignature() != getSignature())
+  if (value.getSuccessfulCommandSignature() != getSignature())
     return false;
 
   // Check the timestamps on each of the outputs.
@@ -195,14 +189,22 @@ bool ExternalCommand::isResultValid(BuildSystem& system,
 
     // If this output is mutated by the build, we can't rely on equivalence,
     // only existence.
+    const auto& output = value.getSuccessfulCommandOutput(i);
     if (node->isMutated()) {
-      if (value.getNthOutputInfo(i).isMissing() != info.isMissing())
+      if (output.isMissingOutput() != info.isMissing())
         return false;
       continue;
     }
 
-    if (value.getNthOutputInfo(i) != info)
-      return false;
+    if (output.isMissingOutput()) {
+      if (!info.isMissing())
+        return false;
+    } else {
+      if (!output.isExistingInput())
+        return false;
+      if (output.getExistingInputFileInfo() != info)
+        return false;
+    }
   }
 
   // Otherwise, the result is ok.
@@ -230,7 +232,7 @@ void ExternalCommand::providePriorValue(BuildSystemCommandInterface&,
                                         const BuildValue& value) {
   if (value.isSuccessfulCommand()) {
     hasPriorResult = true;
-    priorResultCommandSignature = value.getCommandSignature();
+    priorResultCommandSignature = value.getSuccessfulCommandSignature();
   }
 }
 
@@ -241,7 +243,6 @@ void ExternalCommand::provideValue(BuildSystemCommandInterface& bsci,
   // Process the input value to see if we should skip this command.
 
   // All direct inputs should be individual node values.
-  assert(!value.hasMultipleOutputs());
   assert(value.isExistingInput() || value.isMissingInput() ||
          value.isMissingOutput() || value.isFailedInput() ||
          value.isVirtualInput()  || value.isSkippedCommand() ||
@@ -251,7 +252,7 @@ void ExternalCommand::provideValue(BuildSystemCommandInterface& bsci,
   auto getSkipValueForInput = [&]() -> llvm::Optional<BuildValue> {
     // If the value is an signature, existing, or virtual input, we are always
     // good.
-    if (value.isDirectoryTreeSignature() | value.isExistingInput() ||
+    if (value.isDirectoryTreeSignature() || value.isExistingInput() ||
         value.isVirtualInput())
       return llvm::None;
 
@@ -304,17 +305,20 @@ void ExternalCommand::provideValue(BuildSystemCommandInterface& bsci,
 }
 
 bool ExternalCommand::canUpdateIfNewerWithResult(const BuildValue& result) {
+  assert(result.isSuccessfulCommand());
+
   // Unless `allowModifiedOutputs` is specified, we always need to update if
   // ran.
   if (!allowModifiedOutputs)
     return false;
 
   // If it was specified, then we can update if all of our outputs simply exist.
-  for (unsigned i = 0, e = result.getNumOutputs(); i != e; ++i) {
-    const FileInfo& outputInfo = result.getNthOutputInfo(i);
+  for (unsigned i = 0,
+         e = result.getSuccessfulCommandNumOutputs(); i != e; ++i) {
+    const auto& output = result.getSuccessfulCommandOutput(i);
 
     // If the output is missing, we need to rebuild.
-    if (outputInfo.isMissing())
+    if (output.isMissingOutput())
       return false;
   }
   return true;
@@ -325,23 +329,31 @@ ExternalCommand::computeCommandResult(BuildSystemCommandInterface& bsci) {
   // Capture the file information for each of the output nodes.
   //
   // FIXME: We need to delegate to the node here.
-  SmallVector<FileInfo, 8> outputInfos;
+  SmallVector<BuildValue, 8> outputResults;
   for (auto* node: outputs) {
     if (node->isCommandTimestamp()) {
       // FIXME: We currently have to shoehorn the timestamp into a fake file
       // info, but need to refactor the command result to just store the node
       // subvalues instead.
+      //
+      // FIXME: This is no longer necessary, we can make a proper build value
+      // for this.
       FileInfo info{};
       info.size = bsci.getBuildEngine().getCurrentTimestamp();
-      outputInfos.push_back(info);
+      outputResults.push_back(BuildValue::makeExistingInput(info));
     } else if (node->isVirtual()) {
-      outputInfos.push_back(FileInfo{});
+      outputResults.push_back(BuildValue::makeVirtualInput());
     } else {
-      outputInfos.push_back(node->getFileInfo(
-                                bsci.getDelegate().getFileSystem()));
+      // FIXME: We should have a utility for this.
+      auto info = node->getFileInfo(bsci.getDelegate().getFileSystem());
+      if (info.isMissing()) {
+        outputResults.push_back(BuildValue::makeMissingOutput());
+      } else {
+        outputResults.push_back(BuildValue::makeExistingInput(info));
+      }
     }
   }
-  return BuildValue::makeSuccessfulCommand(outputInfos, getSignature());
+  return BuildValue::makeSuccessfulCommand(getSignature(), outputResults);
 }
 
 void ExternalCommand::inputsAvailable(BuildSystemCommandInterface& bsci,

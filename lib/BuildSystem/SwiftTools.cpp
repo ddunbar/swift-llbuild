@@ -148,7 +148,7 @@ public:
       //
       // FIXME: We should support BuildValues with arbitrary payloads.
       bsci.taskIsComplete(task, BuildValue::makeSuccessfulCommand(
-                              basic::FileInfo{}, basic::hashString(result)));
+                              basic::hashString(result), {}));
 #endif
     };
     bsci.addJob({ this, std::move(fn) });

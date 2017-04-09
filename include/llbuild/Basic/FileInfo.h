@@ -30,6 +30,10 @@
 #include <cstdint>
 #include <string>
 
+namespace llvm {
+class raw_ostream;
+}
+
 namespace llbuild {
 namespace basic {
 
@@ -106,6 +110,8 @@ struct FileInfo {
   /// \returns The FileInfo for the given path, which will be missing if the
   /// path does not exist (or any error was encountered).
   static FileInfo getInfoForPath(const std::string& path, bool asLink = false);
+
+  void dump(llvm::raw_ostream& os) const;
 };
 
 template<>

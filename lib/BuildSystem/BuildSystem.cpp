@@ -454,7 +454,8 @@ public:
     if (info.isMissing()) {
       return value.isMissingInput();
     } else {
-      return value.isExistingInput() && value.getOutputInfo() == info;
+      return value.isExistingInput() &&
+        value.getExistingInputFileInfo() == info;
     }
   }
 };
@@ -686,7 +687,8 @@ public:
     if (info.isMissing()) {
       return value.isMissingInput();
     } else {
-      return value.isDirectoryContents() && value.getOutputInfo() == info;
+      return value.isDirectoryContents() &&
+        value.getDirectoryContentsFileInfo() == info;
     }
   }
 };
@@ -778,7 +780,7 @@ class DirectoryTreeSignatureTask : public Task {
       // If this node is a directory, request its signature recursively.
       auto value = BuildValue::fromData(valueData);
       if (value.isExistingInput()) {
-        if (value.getOutputInfo().isDirectory()) {
+        if (value.getExistingInputFileInfo().isDirectory()) {
           SmallString<256> childPath{ path };
           llvm::sys::path::append(childPath, childResult.filename);
         
@@ -2020,8 +2022,9 @@ class SymlinkCommand : public Command {
     // Otherwise, we should have a successful command -- return the actual
     // result for the output.
     assert(value.isSuccessfulCommand());
+    assert(value.getSuccessfulCommandNumOutputs() == 1);
 
-    return BuildValue::makeExistingInput(value.getOutputInfo());
+    return value.getSuccessfulCommandOutput(0);
   }
 
   virtual bool isResultValid(BuildSystem& system,
@@ -2030,13 +2033,20 @@ class SymlinkCommand : public Command {
     if (!value.isSuccessfulCommand())
       return false;
 
+    // If the prior command doesn't look like one for a link, recompute.
+    if (value.getSuccessfulCommandNumOutputs() != 1)
+      return false;
+    const auto& outputValue = value.getSuccessfulCommandOutput(0);
+    if (!outputValue.isExistingInput())
+      return false;
+    
+    // FIXME: This is broken, need to check the desire link target versus the
+    // last one.
+    
     // Otherwise, assume the result is valid if its link status matches the
     // previous one.
     auto info = output->getLinkInfo(system.getDelegate().getFileSystem());
-    if (info.isMissing())
-      return false;
-
-    return info == value.getOutputInfo();
+    return info == outputValue.getExistingInputFileInfo();
   }
   
   virtual void start(BuildSystemCommandInterface& bsci,
@@ -2119,7 +2129,8 @@ class SymlinkCommand : public Command {
       
       // Complete with a successful result.
       bsci.taskIsComplete(
-          task, BuildValue::makeSuccessfulCommand(outputInfo, getSignature()));
+          task, BuildValue::makeSuccessfulCommand(
+              getSignature(), BuildValue::makeExistingInput(outputInfo)));
     };
     bsci.addJob({ this, std::move(fn) });
   }

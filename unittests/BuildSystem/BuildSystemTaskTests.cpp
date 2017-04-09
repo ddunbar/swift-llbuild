@@ -62,7 +62,8 @@ TEST(BuildSystemTaskTests, basics) {
   auto result = system.build(BuildKey::makeNode(path));
   ASSERT_TRUE(result.hasValue());
   ASSERT_TRUE(result.getValue().isExistingInput());
-  ASSERT_EQ(result.getValue().getOutputInfo().size, testString.size());
+  ASSERT_EQ(result.getValue().getExistingInputFileInfo().size,
+            testString.size());
 }
 
 

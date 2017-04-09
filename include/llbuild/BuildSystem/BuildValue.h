@@ -86,82 +86,104 @@ class BuildValue {
     /// Sentinel value representing the result of "building" a top-level target.
     Target,
   };
+
+  /// Get the name of the given kind.
   static StringRef stringForKind(Kind);
 
   friend struct basic::BinaryCodingTraits<BuildValue::Kind>;
+  friend struct basic::BinaryCodingTraits<BuildValue>;
 
   /// The kind of value.
   Kind kind = Kind::Invalid;
 
-  /// The number of attached output infos.
-  uint32_t numOutputInfos = 0;
-
-  /// The command hash, for successful commands.
-  uint64_t commandSignature = 0;
-
+  /// The payload for the specific value kind, if any.
   union {
-    /// The file info for the rule output, for existing inputs, successful
-    /// commands with a single output, and directory contents.
-    FileInfo asOutputInfo;
+    /// The payload of an existing input file.
+    struct {
+      /// The information describing the file.
+      FileInfo fileInfo;
+    } asExistingInput;
 
-    /// The file info for successful commands with multiple outputs.
-    FileInfo* asOutputInfos;
-  } valueData = { {} };
+    /// The payload of an existing input link.
+    struct {
+      /// The information describing the file.
+      FileInfo fileInfo;
 
-  /// String list storage.
-  //
-  // FIXME: We are currently paying the cost for carrying this around on every
-  // value, which is very wasteful. We need to redesign this type to be
-  // customized to each exact value.
-  struct {
-    /// The values are packed as a sequence of C strings.
-    char* contents;
+      /// The link target value.
+      char* target;
+    } asExistingLink;
 
-    /// The total length of the contents.
-    uint64_t size;
-  } stringValues = {0, 0};
+    /// The payload of directory contents.
+    struct {
+      /// The information describing the directory.
+      FileInfo fileInfo;
 
-  bool kindHasCommandSignature() const {
-    return isSuccessfulCommand() || isDirectoryTreeSignature();
-  }
+      /// The names of each member of the directory, packed as a sequence of C
+      /// strings.
+      char* contents;
 
-  bool kindHasStringList() const {
-    return isDirectoryContents();
-  }
+      /// The total length of the contents.
+      uint64_t contentsSize;
+    } asDirectoryContents;
 
-  bool kindHasOutputInfo() const {
-    return isExistingInput() || isSuccessfulCommand() || isDirectoryContents();
-  }
+    /// The payload of a directory tree signature.
+    struct {
+      /// The signature of the command.
+      uint64_t signature;
+    } asDirectoryTreeSignature;
+
+    /// The payload of a successful command.
+    struct {
+      /// The signature of the command.
+      uint64_t signature;
+
+      /// The number of outputs.
+      uint32_t numOutputs;
+
+      /// The values for each output, respectively.
+      BuildValue* outputs;
+    } asSuccessfulCommand;
+  } valueData;
   
 private:
-  // Copying is disabled.
-  BuildValue(const BuildValue&) LLBUILD_DELETED_FUNCTION;
-  void operator=(const BuildValue&) LLBUILD_DELETED_FUNCTION;
-
-  BuildValue() {}
+  BuildValue() : kind(Kind::Invalid) {}
+  BuildValue(Kind kind) : kind(kind) {}
   BuildValue(basic::BinaryDecoder& decoder);
-  BuildValue(Kind kind, uint64_t commandSignature = 0)
-      : kind(kind), commandSignature(commandSignature) { }
-  BuildValue(Kind kind, ArrayRef<FileInfo> outputInfos,
-             uint64_t commandSignature = 0)
-      : kind(kind), numOutputInfos(outputInfos.size()),
-        commandSignature(commandSignature)
+  BuildValue(Kind kind, FileInfo fileInfo) : kind(kind) {
+    assert(kind == Kind::ExistingInput);
+    valueData.asExistingInput.fileInfo = fileInfo;
+  }
+  BuildValue(Kind kind, FileInfo fileInfo, StringRef target) : kind(kind) {
+    assert(kind == Kind::ExistingLink);
+    valueData.asExistingLink.fileInfo = fileInfo;
+    valueData.asExistingLink.target = new char[target.size() + 1];
+    memcpy(valueData.asExistingLink.target, target.data(), target.size());
+    valueData.asExistingLink.target[target.size()] = '\0';
+  }
+  BuildValue(Kind kind, uint64_t signature) : kind(kind) {
+    assert(kind == Kind::DirectoryTreeSignature);
+    valueData.asDirectoryTreeSignature.signature = signature;
+  }
+  BuildValue(Kind kind, uint64_t signature, ArrayRef<BuildValue> outputs)
+      : kind(kind)
   {
-    assert(numOutputInfos >= 1);
-    if (numOutputInfos == 1) {
-      valueData.asOutputInfo = outputInfos[0];
-    } else {
-      valueData.asOutputInfos = new FileInfo[numOutputInfos];
-      for (uint32_t i = 0; i != numOutputInfos; ++i) {
-        valueData.asOutputInfos[i] = outputInfos[i];
-      }
+    assert(kind == Kind::SuccessfulCommand);
+    valueData.asSuccessfulCommand.signature = signature;
+    valueData.asSuccessfulCommand.numOutputs = outputs.size();
+    valueData.asSuccessfulCommand.outputs = new BuildValue[outputs.size()];
+    for (uint32_t i = 0; i != outputs.size(); ++i) {
+      // FIXME: It is unfortunate we end up doing a lot of copies here in
+      // practice, we really want to move in the entire array of outputs.
+      valueData.asSuccessfulCommand.outputs[i] = outputs[i];
     }
   }
   
   /// Create a build value containing file information and string values.
-  BuildValue(Kind kind, FileInfo info, ArrayRef<std::string> values)
-      : BuildValue(kind, info)
+  BuildValue(Kind kind, FileInfo fileInfo, ArrayRef<std::string> values)
+      : kind(kind)
   {
+    assert(kind == Kind::DirectoryContents);
+    valueData.asDirectoryContents.fileInfo = fileInfo;
     // Construct the concatenated data.
     uint64_t size = 0;
     for (auto value: values) {
@@ -174,83 +196,378 @@ private:
       p += value.size();
       *p++ = '\0';
     }
-    stringValues.contents = contents;
-    stringValues.size = size;
+    valueData.asDirectoryContents.contents = contents;
+    valueData.asDirectoryContents.contentsSize = size;
   }
 
+  /// Encode the value onto the given coder.
+  void encode(basic::BinaryEncoder& coder) const;
   
-  std::vector<StringRef> getStringListValues() const {
-    assert(kindHasStringList());
-    std::vector<StringRef> result;
-    for (uint64_t i = 0; i < stringValues.size;) {
-      auto value = StringRef(&stringValues.contents[i]);
-      assert(i + value.size() <= stringValues.size);
-      result.push_back(value);
-      i += value.size() + 1;
-    }
-    return result;
-  }
-
-  FileInfo& getNthOutputInfo(unsigned n) {
-    assert(kindHasOutputInfo() && "invalid call for value kind");
-    assert(n < getNumOutputs());
-    if (hasMultipleOutputs()) {
-      return valueData.asOutputInfos[n];
-    } else {
-      assert(n == 0);
-      return valueData.asOutputInfo;
-    }
-  }
-
 public:
-  // BuildValues can only be moved, not copied.
-  BuildValue(BuildValue&& rhs) : numOutputInfos(rhs.numOutputInfos) {
-    kind = rhs.kind;
-    numOutputInfos = rhs.numOutputInfos;
-    commandSignature = rhs.commandSignature;
-    if (rhs.hasMultipleOutputs()) {
-      valueData.asOutputInfos = rhs.valueData.asOutputInfos;
-      rhs.valueData.asOutputInfos = nullptr;
-    } else {
-      valueData.asOutputInfo = rhs.valueData.asOutputInfo;
+  BuildValue(BuildValue&& rhs) : kind(rhs.kind) {
+    switch (kind) {
+    case Kind::Invalid:
+    case Kind::VirtualInput:
+    case Kind::MissingInput:
+    case Kind::MissingOutput:
+    case Kind::FailedInput:
+    case Kind::FailedCommand:
+    case Kind::PropagatedFailureCommand:
+    case Kind::CancelledCommand:
+    case Kind::SkippedCommand:
+    case Kind::Target:
+      break;
+      
+    case Kind::ExistingInput:
+      valueData.asExistingInput.fileInfo =
+        rhs.valueData.asExistingInput.fileInfo;
+      break;
+    case Kind::ExistingLink:
+      valueData.asExistingLink.fileInfo =
+        rhs.valueData.asExistingLink.fileInfo;
+      valueData.asExistingLink.target = rhs.valueData.asExistingLink.target;
+      break;
+    case Kind::DirectoryContents:
+      valueData.asDirectoryContents.fileInfo =
+        rhs.valueData.asDirectoryContents.fileInfo;
+      valueData.asDirectoryContents.contents =
+        rhs.valueData.asDirectoryContents.contents;
+      valueData.asDirectoryContents.contentsSize =
+        rhs.valueData.asDirectoryContents.contentsSize;
+      break;
+    case Kind::DirectoryTreeSignature:
+      valueData.asDirectoryTreeSignature.signature =
+        rhs.valueData.asDirectoryTreeSignature.signature;
+      break;
+    case Kind::SuccessfulCommand:
+      valueData.asSuccessfulCommand.signature =
+        rhs.valueData.asSuccessfulCommand.signature;
+      valueData.asSuccessfulCommand.numOutputs =
+        rhs.valueData.asSuccessfulCommand.numOutputs;
+      valueData.asSuccessfulCommand.outputs =
+        rhs.valueData.asSuccessfulCommand.outputs;
+      break;
     }
-    if (rhs.kindHasStringList()) {
-      stringValues = rhs.stringValues;
-      rhs.stringValues.contents = nullptr;
+
+    // Invalidate the RHS.
+    rhs.kind = Kind::Invalid;
+  }
+  BuildValue(const BuildValue& rhs) : kind(rhs.kind) {
+    switch (kind) {
+    case Kind::Invalid:
+    case Kind::VirtualInput:
+    case Kind::MissingInput:
+    case Kind::MissingOutput:
+    case Kind::FailedInput:
+    case Kind::FailedCommand:
+    case Kind::PropagatedFailureCommand:
+    case Kind::CancelledCommand:
+    case Kind::SkippedCommand:
+    case Kind::Target:
+      break;
+      
+    case Kind::ExistingInput:
+      valueData.asExistingInput.fileInfo =
+        rhs.valueData.asExistingInput.fileInfo;
+      break;
+    case Kind::ExistingLink: {
+      valueData.asExistingLink.fileInfo =
+        rhs.valueData.asExistingLink.fileInfo;
+      uint32_t targetSize = (uint32_t) ::strlen(
+          rhs.valueData.asExistingLink.target);
+      valueData.asExistingLink.target = new char[targetSize + 1];
+      memcpy(valueData.asExistingLink.target,
+             rhs.valueData.asExistingLink.target,
+             targetSize + 1);
+      break;
+    }
+    case Kind::DirectoryContents:
+      valueData.asDirectoryContents.fileInfo =
+        rhs.valueData.asDirectoryContents.fileInfo;
+      valueData.asDirectoryContents.contentsSize =
+        rhs.valueData.asDirectoryContents.contentsSize;
+      valueData.asDirectoryContents.contents =
+        new char[valueData.asDirectoryContents.contentsSize];
+      memcpy(valueData.asDirectoryContents.contents,
+             rhs.valueData.asDirectoryContents.contents,
+             valueData.asDirectoryContents.contentsSize);
+      break;
+    case Kind::DirectoryTreeSignature:
+      valueData.asDirectoryTreeSignature.signature =
+        rhs.valueData.asDirectoryTreeSignature.signature;
+      break;
+    case Kind::SuccessfulCommand:
+      valueData.asSuccessfulCommand.signature =
+        rhs.valueData.asSuccessfulCommand.signature;
+      valueData.asSuccessfulCommand.numOutputs =
+        rhs.valueData.asSuccessfulCommand.numOutputs;
+      valueData.asSuccessfulCommand.outputs = new BuildValue[
+          valueData.asSuccessfulCommand.numOutputs];
+      for (uint32_t i = 0; i != valueData.asSuccessfulCommand.numOutputs; ++i) {
+        valueData.asSuccessfulCommand.outputs[i] =
+          rhs.valueData.asSuccessfulCommand.outputs[i];
+      }
+      break;
     }
   }
   BuildValue& operator=(BuildValue&& rhs) {
     if (this != &rhs) {
-      // Release our resources.
-      if (hasMultipleOutputs())
-        delete[] valueData.asOutputInfos;
+      // Release existing data.
+      switch (kind) {
+      case Kind::Invalid:
+      case Kind::VirtualInput:
+      case Kind::MissingInput:
+      case Kind::MissingOutput:
+      case Kind::FailedInput:
+      case Kind::FailedCommand:
+      case Kind::PropagatedFailureCommand:
+      case Kind::CancelledCommand:
+      case Kind::SkippedCommand:
+      case Kind::Target:
+        break;
+
+      case Kind::ExistingInput:
+      case Kind::DirectoryTreeSignature:
+        break;
+        
+      case Kind::ExistingLink:
+        delete[] valueData.asExistingLink.target;
+        break;
+      case Kind::DirectoryContents:
+        delete[] valueData.asDirectoryContents.contents;
+        break;
+      case Kind::SuccessfulCommand:
+        delete[] valueData.asSuccessfulCommand.outputs;
+        break;
+      }
 
       // Move the data.
       kind = rhs.kind;
-      numOutputInfos = rhs.numOutputInfos;
-      commandSignature = rhs.commandSignature;
-      if (rhs.hasMultipleOutputs()) {
-        valueData.asOutputInfos = rhs.valueData.asOutputInfos;
-        rhs.valueData.asOutputInfos = nullptr;
-      } else {
-        valueData.asOutputInfo = rhs.valueData.asOutputInfo;
+      switch (kind) {
+      case Kind::Invalid:
+      case Kind::VirtualInput:
+      case Kind::MissingInput:
+      case Kind::MissingOutput:
+      case Kind::FailedInput:
+      case Kind::FailedCommand:
+      case Kind::PropagatedFailureCommand:
+      case Kind::CancelledCommand:
+      case Kind::SkippedCommand:
+      case Kind::Target:
+        break;
+        
+      case Kind::ExistingInput:
+        valueData.asExistingInput.fileInfo =
+          rhs.valueData.asExistingInput.fileInfo;
+        break;
+      case Kind::ExistingLink:
+        valueData.asExistingLink.fileInfo =
+          rhs.valueData.asExistingLink.fileInfo;
+        valueData.asExistingLink.target = rhs.valueData.asExistingLink.target;
+        break;
+      case Kind::DirectoryContents:
+        valueData.asDirectoryContents.fileInfo =
+          rhs.valueData.asDirectoryContents.fileInfo;
+        valueData.asDirectoryContents.contents =
+          rhs.valueData.asDirectoryContents.contents;
+        valueData.asDirectoryContents.contentsSize =
+          rhs.valueData.asDirectoryContents.contentsSize;
+        break;
+      case Kind::DirectoryTreeSignature:
+        valueData.asDirectoryTreeSignature.signature =
+          rhs.valueData.asDirectoryTreeSignature.signature;
+        break;
+      case Kind::SuccessfulCommand:
+        valueData.asSuccessfulCommand.signature =
+          rhs.valueData.asSuccessfulCommand.signature;
+        valueData.asSuccessfulCommand.numOutputs =
+          rhs.valueData.asSuccessfulCommand.numOutputs;
+        valueData.asSuccessfulCommand.outputs =
+          rhs.valueData.asSuccessfulCommand.outputs;
+        break;
       }
-      if (rhs.kindHasStringList()) {
-        stringValues = rhs.stringValues;
-        rhs.stringValues.contents = nullptr;
+      // Invalidate the RHS.
+      rhs.kind = Kind::Invalid;
+    }
+    return *this;
+  }
+  BuildValue& operator=(const BuildValue& rhs) {
+    if (this != &rhs) {
+      // Release existing data.
+      switch (kind) {
+      case Kind::Invalid:
+      case Kind::VirtualInput:
+      case Kind::MissingInput:
+      case Kind::MissingOutput:
+      case Kind::FailedInput:
+      case Kind::FailedCommand:
+      case Kind::PropagatedFailureCommand:
+      case Kind::CancelledCommand:
+      case Kind::SkippedCommand:
+      case Kind::Target:
+        break;
+
+      case Kind::ExistingInput:
+      case Kind::DirectoryTreeSignature:
+        break;
+        
+      case Kind::ExistingLink:
+        delete[] valueData.asExistingLink.target;
+        break;
+      case Kind::DirectoryContents:
+        delete[] valueData.asDirectoryContents.contents;
+        break;
+      case Kind::SuccessfulCommand:
+        delete[] valueData.asSuccessfulCommand.outputs;
+        break;
+      }
+
+      kind = rhs.kind;
+      switch (kind) {
+      case Kind::Invalid:
+      case Kind::VirtualInput:
+      case Kind::MissingInput:
+      case Kind::MissingOutput:
+      case Kind::FailedInput:
+      case Kind::FailedCommand:
+      case Kind::PropagatedFailureCommand:
+      case Kind::CancelledCommand:
+      case Kind::SkippedCommand:
+      case Kind::Target:
+        break;
+        
+      case Kind::ExistingInput:
+        valueData.asExistingInput.fileInfo =
+          rhs.valueData.asExistingInput.fileInfo;
+        break;
+      case Kind::ExistingLink: {
+        valueData.asExistingLink.fileInfo =
+          rhs.valueData.asExistingLink.fileInfo;
+        uint32_t targetSize = (uint32_t) ::strlen(
+            rhs.valueData.asExistingLink.target);
+        valueData.asExistingLink.target = new char[targetSize + 1];
+        memcpy(valueData.asExistingLink.target,
+               rhs.valueData.asExistingLink.target,
+               targetSize + 1);
+        break;
+      }
+      case Kind::DirectoryContents:
+        valueData.asDirectoryContents.fileInfo =
+          rhs.valueData.asDirectoryContents.fileInfo;
+        valueData.asDirectoryContents.contentsSize =
+          rhs.valueData.asDirectoryContents.contentsSize;
+        valueData.asDirectoryContents.contents =
+          new char[valueData.asDirectoryContents.contentsSize];
+        memcpy(valueData.asDirectoryContents.contents,
+               rhs.valueData.asDirectoryContents.contents,
+               valueData.asDirectoryContents.contentsSize);
+        break;
+      case Kind::DirectoryTreeSignature:
+        valueData.asDirectoryTreeSignature.signature =
+          rhs.valueData.asDirectoryTreeSignature.signature;
+        break;
+      case Kind::SuccessfulCommand:
+        valueData.asSuccessfulCommand.signature =
+          rhs.valueData.asSuccessfulCommand.signature;
+        valueData.asSuccessfulCommand.numOutputs =
+          rhs.valueData.asSuccessfulCommand.numOutputs;
+        valueData.asSuccessfulCommand.outputs = new BuildValue[
+            valueData.asSuccessfulCommand.numOutputs];
+        for (uint32_t i = 0; i !=
+               valueData.asSuccessfulCommand.numOutputs; ++i) {
+          valueData.asSuccessfulCommand.outputs[i] =
+            rhs.valueData.asSuccessfulCommand.outputs[i];
+        }
+        break;
       }
     }
     return *this;
   }
   ~BuildValue() {
-    if (hasMultipleOutputs()) {
-      delete[] valueData.asOutputInfos;
-    }
-    if (kindHasStringList()) {
-      delete[] stringValues.contents;
+    switch (kind) {
+    case Kind::Invalid:
+    case Kind::VirtualInput:
+    case Kind::MissingInput:
+    case Kind::MissingOutput:
+    case Kind::FailedInput:
+    case Kind::FailedCommand:
+    case Kind::PropagatedFailureCommand:
+    case Kind::CancelledCommand:
+    case Kind::SkippedCommand:
+    case Kind::Target:
+      break;
+
+    case Kind::ExistingInput:
+    case Kind::DirectoryTreeSignature:
+      break;
+
+    case Kind::ExistingLink:
+      delete[] valueData.asExistingLink.target;
+      break;
+    case Kind::DirectoryContents:
+      delete[] valueData.asDirectoryContents.contents;
+      break;
+    case Kind::SuccessfulCommand:
+      delete[] valueData.asSuccessfulCommand.outputs;
+      break;
     }
   }
 
+  bool operator==(const BuildValue& rhs) const {
+    if (kind != rhs.kind)
+      return false;
+
+    switch (kind) {
+    case Kind::Invalid:
+    case Kind::VirtualInput:
+    case Kind::MissingInput:
+    case Kind::MissingOutput:
+    case Kind::FailedInput:
+    case Kind::FailedCommand:
+    case Kind::PropagatedFailureCommand:
+    case Kind::CancelledCommand:
+    case Kind::SkippedCommand:
+    case Kind::Target:
+      return true;
+
+    case Kind::ExistingInput:
+      return getExistingInputFileInfo() == rhs.getExistingInputFileInfo();
+    case Kind::DirectoryTreeSignature:
+      return getDirectoryTreeSignature() == rhs.getDirectoryTreeSignature();
+
+    case Kind::ExistingLink:
+      if (getExistingLinkFileInfo() != rhs.getExistingLinkFileInfo()) {
+        return false;
+      }
+      return getExistingLinkTarget() == rhs.getExistingLinkTarget();
+    case Kind::DirectoryContents:
+      if (getDirectoryContentsFileInfo() !=
+          rhs.getDirectoryContentsFileInfo()) {
+        return false;
+      }
+      return getDirectoryContents() == rhs.getDirectoryContents();
+    case Kind::SuccessfulCommand:
+      if (getSuccessfulCommandSignature() !=
+          rhs.getSuccessfulCommandSignature()) {
+        return false;
+      }
+      if (getSuccessfulCommandNumOutputs() !=
+          rhs.getSuccessfulCommandNumOutputs()) {
+        return false;
+      }
+      for (unsigned i = 0, e = getSuccessfulCommandNumOutputs(); i != e; ++i) {
+        if (getSuccessfulCommandOutput(i) != rhs.getSuccessfulCommandOutput(i))
+          return false;
+      }
+      return true;
+    }
+
+    return false;
+  }
+  bool operator!=(const BuildValue& rhs) const {
+    return !(*this == rhs);
+  }
+  
   /// @name Construction Functions
   /// @{
 
@@ -260,14 +577,13 @@ public:
   static BuildValue makeVirtualInput() {
     return BuildValue(Kind::VirtualInput);
   }
-  static BuildValue makeExistingInput(FileInfo outputInfo) {
-    assert(!outputInfo.isMissing());
-    return BuildValue(Kind::ExistingInput, outputInfo);
+  static BuildValue makeExistingInput(FileInfo fileInfo) {
+    assert(!fileInfo.isMissing());
+    return BuildValue(Kind::ExistingInput, fileInfo);
   }
-  static BuildValue makeExistingLink(FileInfo outputInfo,
-                                     std::string linkValue) {
-    return BuildValue(Kind::ExistingLink, outputInfo,
-                      llvm::makeArrayRef(linkValue));
+  static BuildValue makeExistingLink(FileInfo fileInfo,
+                                     StringRef target) {
+    return BuildValue(Kind::ExistingLink, fileInfo, target);
   }
   static BuildValue makeMissingInput() {
     return BuildValue(Kind::MissingInput);
@@ -285,9 +601,9 @@ public:
   static BuildValue makeFailedInput() {
     return BuildValue(Kind::FailedInput);
   }
-  static BuildValue makeSuccessfulCommand(
-      ArrayRef<FileInfo> outputInfos, uint64_t commandSignature) {
-    return BuildValue(Kind::SuccessfulCommand, outputInfos, commandSignature);
+  static BuildValue makeSuccessfulCommand(uint64_t commandSignature,
+                                          ArrayRef<BuildValue> outputs) {
+    return BuildValue(Kind::SuccessfulCommand, commandSignature, outputs);
   }
   static BuildValue makeFailedCommand() {
     return BuildValue(Kind::FailedCommand);
@@ -332,51 +648,59 @@ public:
   bool isSkippedCommand() const { return kind == Kind::SkippedCommand; }
   bool isTarget() const { return kind == Kind::Target; }
 
-  StringRef getLinkTarget() const {
+  const FileInfo& getExistingInputFileInfo() const {
+    assert(isExistingInput() && "invalid call for value kind");
+    return valueData.asExistingInput.fileInfo;
+  }
+
+  const FileInfo& getExistingLinkFileInfo() const {
+    assert(isExistingLink() && "invalid call for value kind");
+    return valueData.asExistingLink.fileInfo;
+  }
+  StringRef getExistingLinkTarget() const {
+    assert(isExistingLink() && "invalid call for value kind");
+    return valueData.asExistingLink.target;
+  }
+
+  const FileInfo& getDirectoryContentsFileInfo() const {
     assert(isDirectoryContents() && "invalid call for value kind");
-    return getStringListValues()[0];
+    return valueData.asDirectoryContents.fileInfo;
   }
 
   std::vector<StringRef> getDirectoryContents() const {
     assert(isDirectoryContents() && "invalid call for value kind");
-    return getStringListValues();
+
+    // FIXME: It would be more efficient to simply provide an iterator based
+    // interface.
+    std::vector<StringRef> result;
+    for (uint64_t i = 0; i < valueData.asDirectoryContents.contentsSize;) {
+      auto value = StringRef(&valueData.asDirectoryContents.contents[i]);
+      assert(i + value.size() <= valueData.asDirectoryContents.contentsSize);
+      result.push_back(value);
+      i += value.size() + 1;
+    }
+    return result;
   }
   
   uint64_t getDirectoryTreeSignature() const {
     assert(isDirectoryTreeSignature() && "invalid call for value kind");
-    return commandSignature;
+    return valueData.asDirectoryTreeSignature.signature;
   }
 
-  bool hasMultipleOutputs() const {
-    return numOutputInfos > 1;
-  }
-
-  unsigned getNumOutputs() const {
-    assert(kindHasOutputInfo() && "invalid call for value kind");
-    return numOutputInfos;
-  }
-
-  const FileInfo& getOutputInfo() const {
-    assert(kindHasOutputInfo() && "invalid call for value kind");
-    assert(!hasMultipleOutputs() &&
-           "invalid call on result with multiple outputs");
-    return valueData.asOutputInfo;
-  }
-
-  const FileInfo& getNthOutputInfo(unsigned n) const {
-    assert(kindHasOutputInfo() && "invalid call for value kind");
-    assert(n < getNumOutputs());
-    if (hasMultipleOutputs()) {
-      return valueData.asOutputInfos[n];
-    } else {
-      assert(n == 0);
-      return valueData.asOutputInfo;
-    }
-  }
-
-  uint64_t getCommandSignature() const {
+  uint64_t getSuccessfulCommandSignature() const {
     assert(isSuccessfulCommand() && "invalid call for value kind");
-    return commandSignature;
+    return valueData.asSuccessfulCommand.signature;
+  }
+
+  unsigned getSuccessfulCommandNumOutputs() const {
+    assert(isSuccessfulCommand() && "invalid call for value kind");
+    return valueData.asSuccessfulCommand.numOutputs;
+  }
+
+  const BuildValue& getSuccessfulCommandOutput(unsigned n) const {
+    assert(isSuccessfulCommand() && "invalid call for value kind");
+    assert(n < getSuccessfulCommandNumOutputs() && "invalid index");
+    return valueData.asSuccessfulCommand.outputs[n];
   }
 
   /// @}
@@ -386,7 +710,9 @@ public:
 
   static BuildValue fromData(const core::ValueType& value) {
     basic::BinaryDecoder decoder(StringRef((char*)value.data(), value.size()));
-    return BuildValue(decoder);
+    auto result = BuildValue(decoder);
+    decoder.finish();
+    return result;
   }
   core::ValueType toData() const;
 
@@ -406,7 +732,7 @@ template<>
 struct basic::BinaryCodingTraits<buildsystem::BuildValue::Kind> {
   typedef buildsystem::BuildValue::Kind Kind;
   
-  static inline void encode(Kind& value, BinaryEncoder& coder) {
+  static inline void encode(const Kind& value, BinaryEncoder& coder) {
     uint8_t tmp = uint8_t(value);
     assert(value == Kind(tmp));
     coder.write(tmp);
@@ -418,6 +744,18 @@ struct basic::BinaryCodingTraits<buildsystem::BuildValue::Kind> {
   }
 };
 
+template<>
+struct basic::BinaryCodingTraits<buildsystem::BuildValue> {
+  static inline void encode(const buildsystem::BuildValue& value,
+                            BinaryEncoder& coder) {
+    value.encode(coder);
+  }
+  static inline void decode(buildsystem::BuildValue& value,
+                            BinaryDecoder& coder) {
+    value = buildsystem::BuildValue(coder);
+  }
+};
+
 inline buildsystem::BuildValue::BuildValue(basic::BinaryDecoder& coder) {
   // Handle empty decode requests.
   if (coder.isEmpty()) {
@@ -426,43 +764,107 @@ inline buildsystem::BuildValue::BuildValue(basic::BinaryDecoder& coder) {
   }
   
   coder.read(kind);
-  if (kindHasCommandSignature())
-    coder.read(commandSignature);
-  if (kindHasOutputInfo()) {
-    coder.read(numOutputInfos);
-    if (numOutputInfos > 1) {
-      valueData.asOutputInfos = new FileInfo[numOutputInfos];
-    }
-    for (uint32_t i = 0; i != numOutputInfos; ++i) {
-      coder.read(getNthOutputInfo(i));
-    }
+  switch (kind) {
+  case Kind::Invalid:
+  case Kind::VirtualInput:
+  case Kind::MissingInput:
+  case Kind::MissingOutput:
+  case Kind::FailedInput:
+  case Kind::FailedCommand:
+  case Kind::PropagatedFailureCommand:
+  case Kind::CancelledCommand:
+  case Kind::SkippedCommand:
+  case Kind::Target:
+    break;
+      
+  case Kind::ExistingInput:
+    coder.read(valueData.asExistingInput.fileInfo);
+    break;
+  case Kind::ExistingLink: {
+    coder.read(valueData.asExistingLink.fileInfo);
+    uint32_t targetSize;
+    coder.read(targetSize);
+    StringRef target;
+    coder.readBytes(targetSize, target);
+    valueData.asExistingLink.target = new char[targetSize + 1];
+    memcpy(valueData.asExistingLink.target, target.data(), targetSize);
+    valueData.asExistingLink.target[targetSize] = '\0';
+    break;
   }
-  if (kindHasStringList()) {
-    coder.read(stringValues.size);
+  case Kind::DirectoryContents: {
+    coder.read(valueData.asDirectoryContents.fileInfo);
+    coder.read(valueData.asDirectoryContents.contentsSize);
     StringRef contents;
-    coder.readBytes(stringValues.size, contents);
-    stringValues.contents = new char[stringValues.size];
-    memcpy(stringValues.contents, contents.data(), contents.size());
+    coder.readBytes(valueData.asDirectoryContents.contentsSize, contents);
+    valueData.asDirectoryContents.contents =
+      new char[valueData.asDirectoryContents.contentsSize];
+    memcpy(valueData.asDirectoryContents.contents,
+           contents.data(), contents.size());
+    break;
   }
-  coder.finish();
+  case Kind::DirectoryTreeSignature:
+    coder.read(valueData.asDirectoryTreeSignature.signature);
+    break;
+  case Kind::SuccessfulCommand:
+    coder.read(valueData.asSuccessfulCommand.signature);
+    coder.read(valueData.asSuccessfulCommand.numOutputs);
+    valueData.asSuccessfulCommand.outputs =
+      new BuildValue[valueData.asSuccessfulCommand.numOutputs];
+    for (uint32_t i = 0; i != valueData.asSuccessfulCommand.numOutputs; ++i) {
+      coder.read(valueData.asSuccessfulCommand.outputs[i]);
+    }
+    break;
+  }
 }
 
 inline core::ValueType buildsystem::BuildValue::toData() const {
   basic::BinaryEncoder coder;
-  coder.write(kind);
-  if (kindHasCommandSignature())
-    coder.write(commandSignature);
-  if (kindHasOutputInfo()) {
-    coder.write(numOutputInfos);
-    for (uint32_t i = 0; i != numOutputInfos; ++i) {
-      coder.write(getNthOutputInfo(i));
-    }
-  }
-  if (kindHasStringList()) {
-    coder.write(stringValues.size);
-    coder.writeBytes(StringRef(stringValues.contents, stringValues.size));
-  }
+  coder.write(*this);
   return coder.contents();
+}
+
+inline void buildsystem::BuildValue::encode(basic::BinaryEncoder& coder) const {
+  coder.write(kind);
+  switch (kind) {
+  case Kind::Invalid:
+  case Kind::VirtualInput:
+  case Kind::MissingInput:
+  case Kind::MissingOutput:
+  case Kind::FailedInput:
+  case Kind::FailedCommand:
+  case Kind::PropagatedFailureCommand:
+  case Kind::CancelledCommand:
+  case Kind::SkippedCommand:
+  case Kind::Target:
+    break;
+      
+  case Kind::ExistingInput:
+    coder.write(valueData.asExistingInput.fileInfo);
+    break;
+  case Kind::ExistingLink: {
+    coder.write(valueData.asExistingLink.fileInfo);
+    uint32_t targetSize = (uint32_t) ::strlen(valueData.asExistingLink.target);
+    coder.write(targetSize);
+    coder.writeBytes(StringRef(valueData.asExistingLink.target, targetSize));
+    break;
+  }
+  case Kind::DirectoryContents:
+    coder.write(valueData.asDirectoryContents.fileInfo);
+    coder.write(valueData.asDirectoryContents.contentsSize);
+    coder.writeBytes(StringRef(valueData.asDirectoryContents.contents,
+                               valueData.asDirectoryContents.contentsSize));
+    break;
+  case Kind::DirectoryTreeSignature:
+    coder.write(valueData.asDirectoryTreeSignature.signature);
+    break;
+  case Kind::SuccessfulCommand:
+    coder.write(valueData.asSuccessfulCommand.signature);
+    coder.write(valueData.asSuccessfulCommand.numOutputs);
+    for (uint32_t i = 0; i != valueData.asSuccessfulCommand.numOutputs; ++i) {
+      coder.write(valueData.asSuccessfulCommand.outputs[i]);
+    }
+    break;
+  }
 }
 
 }

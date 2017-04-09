@@ -14,6 +14,8 @@
 
 #include "llbuild/Basic/PlatformUtility.h"
 
+#include "llvm/Support/raw_ostream.h"
+
 #include <cassert>
 #include <cstring>
 
@@ -65,4 +67,17 @@ FileInfo FileInfo::getInfoForPath(const std::string& path, bool asLink) {
   }
 
   return result;
+}
+
+void FileInfo::dump(raw_ostream& os) const {
+  if (isMissing()) {
+    os << "FileInfo{/*missing*/}";
+  } else {
+    os << "FileInfo{"
+       << "dev=" << device
+       << ", inode=" << inode
+       << ", mode=" << mode
+       << ", size=" << size
+       << ", modTime=(" << modTime.seconds << ":" << modTime.nanoseconds << "}";
+  }
 }

@@ -83,7 +83,7 @@ public:
 
   /// Encode a value to the stream.
   template<typename T>
-  void write(T value) {
+  void write(const T& value) {
     BinaryCodingTraits<T>::encode(value, *this);
   }
 
