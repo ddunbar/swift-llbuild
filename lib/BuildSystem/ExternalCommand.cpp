@@ -377,8 +377,6 @@ void ExternalCommand::execute(BuildSystemCommandInterface& bsci,
     if (!node->isVirtual()) {
       // Attempt to create the directory; we ignore errors here under the
       // assumption the command will diagnose the situation if necessary.
-      //
-      // FIXME: Need to use the filesystem interfaces.
       auto parent = llvm::sys::path::parent_path(node->getName());
       if (!parent.empty()) {
         (void) bsci.getFileSystem().createDirectories(parent);
@@ -388,6 +386,7 @@ void ExternalCommand::execute(BuildSystemCommandInterface& bsci,
     
   // Invoke the external command.
   bsci.getDelegate().commandStarted(this);
+  
   executeExternalCommand(bsci, task, context, {[this, &bsci, resultFn](ProcessResult result){
     bsci.getDelegate().commandFinished(this, result.status);
 

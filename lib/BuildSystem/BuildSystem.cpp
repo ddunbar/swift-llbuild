@@ -14,6 +14,8 @@
 #include "llbuild/BuildSystem/BuildSystemCommandInterface.h"
 #include "llbuild/BuildSystem/BuildSystemFrontend.h"
 
+#include "BuildSystemHandlers.h"
+
 #include "llbuild/Basic/CrossPlatformCompatibility.h"
 #include "llbuild/Basic/ExecutionQueue.h"
 #include "llbuild/Basic/FileInfo.h"
@@ -238,6 +240,12 @@ private:
     executionQueue->addJob(std::move(job));
   }
 
+  virtual std::unique_ptr<ShellCommandHandler>
+  resolveShellCommandHandler(ExternalCommand*) override {
+    // FIXME: Implement.
+    return nullptr;
+  }
+  
   /// @}
 
 public:
@@ -1969,6 +1977,25 @@ class ShellCommand : public ExternalCommand {
 
   /// The cached signature, once computed -- 0 is used as a sentinel value.
   std::atomic<CommandSignature> cachedSignature{ };
+
+  /// The handler to use for this command, if present.
+  std::unique_ptr<ShellCommandHandler> handler;
+
+  /// The handler state, if used.
+  std::unique_ptr<HandlerState> handlerState;
+
+  virtual void start(BuildSystemCommandInterface& bsci,
+                     core::Task* task) override {
+    // Resolve the plugin state.
+    handler = bsci.resolveShellCommandHandler(this);
+
+    // Delegate to handler, if used.
+    if (auto p = handler.get()) {
+      handlerState = p->start(bsci, this);
+    }
+
+    this->ExternalCommand::start(bsci, task);
+  }
   
   virtual CommandSignature getSignature() override {
     CommandSignature signature = cachedSignature;
@@ -2282,13 +2309,7 @@ public:
       Task* task,
       QueueJobContext* context,
       llvm::Optional<ProcessCompletionFn> completionFn) override {
-
-    // Execute the command.
-    bsci.getExecutionQueue().executeProcess(
-        context, args, env,
-        /*inheritEnvironment=*/inheritEnv,
-        {canSafelyInterrupt, workingDirectory, controlEnabled},
-        /*completionFn=*/{[this, &bsci, task, completionFn](ProcessResult result) {
+    auto commandCompletionFn = [this, &bsci, task, completionFn](ProcessResult result) {
           if (result.status != ProcessStatus::Succeeded) {
             // If the command failed, there is no need to gather dependencies.
             if (completionFn.hasValue())
@@ -2316,7 +2337,23 @@ public:
 
           if (completionFn.hasValue())
             completionFn.getValue()(result);
-        }});
+      };
+      
+    // Delegate to the handler, if present.
+    if (auto *p = handler.get()) {
+      // FIXME: We should consider making this interface capable of feeding
+      // back the dependencies directly.
+      p->execute(
+          handlerState.get(), this, bsci, task, context, commandCompletionFn);
+      return;
+    }
+
+    // Execute the command.
+    bsci.getExecutionQueue().executeProcess(
+        context, args, env,
+        /*inheritEnvironment=*/inheritEnv,
+        {canSafelyInterrupt, workingDirectory, controlEnabled},
+        /*completionFn=*/{commandCompletionFn});
   }
 };
 
