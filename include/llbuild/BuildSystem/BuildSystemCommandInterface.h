@@ -35,7 +35,7 @@ class BuildKey;
 class BuildSystemDelegate;
 class BuildValue;
 class ShellCommandHandler;
-class ExternalCommand;
+class ShellCommand;
 
 /// This is an abstract interface class which defines the API available to
 /// Commands when being invoked by the BuildSystem for the purposes of
@@ -88,7 +88,7 @@ public:
   /// @{
 
   virtual std::unique_ptr<ShellCommandHandler>
-  resolveShellCommandHandler(ExternalCommand*) = 0;
+  resolveShellCommandHandler(ShellCommand*) = 0;
   
   /// @}
 };
