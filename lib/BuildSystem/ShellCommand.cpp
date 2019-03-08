@@ -33,8 +33,8 @@ void ShellCommand::start(BuildSystemCommandInterface& bsci,
   handler = bsci.resolveShellCommandHandler(this);
 
   // Delegate to handler, if used.
-  if (auto p = handler.get()) {
-    handlerState = p->start(bsci, this);
+  if (handler) {
+    handlerState = handler->start(bsci, this);
   }
 
   this->ExternalCommand::start(bsci, task);
@@ -364,10 +364,10 @@ void ShellCommand::executeExternalCommand(
   };
       
   // Delegate to the handler, if present.
-  if (auto *p = handler.get()) {
+  if (handler) {
     // FIXME: We should consider making this interface capable of feeding
     // back the dependencies directly.
-    p->execute(
+    handler->execute(
         handlerState.get(), this, bsci, task, context, commandCompletionFn);
     return;
   }

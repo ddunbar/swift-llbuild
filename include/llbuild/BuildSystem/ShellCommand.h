@@ -86,7 +86,7 @@ class ShellCommand : public ExternalCommand {
   std::atomic<basic::CommandSignature> cachedSignature{ };
 
   /// The handler to use for this command, if present.
-  std::unique_ptr<ShellCommandHandler> handler;
+  ShellCommandHandler* handler;
 
   /// The handler state, if used.
   std::unique_ptr<HandlerState> handlerState;

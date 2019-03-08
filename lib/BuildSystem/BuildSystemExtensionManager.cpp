@@ -23,6 +23,10 @@ using namespace llbuild;
 using namespace llbuild::basic;
 using namespace llbuild::buildsystem;
 
+HandlerState::~HandlerState() {}
+ShellCommandHandler::~ShellCommandHandler() {}
+BuildSystemExtension::~BuildSystemExtension() {}
+
 #pragma mark - BuildSystemExtensionManager implementation
 
 BuildSystemExtension*
@@ -94,15 +98,24 @@ BuildSystemExtensionManager::lookupByCommandPath(StringRef path) {
     return {};
   }
 
-  auto registrationFn = dlsym(
+  auto registrationFn = (BuildSystemExtension*(*)(void)) dlsym(
       handle, "initialize_llbuild_buildsystem_extension_v0");
   if (!registrationFn) {
     dlclose(handle);
     return {};
   }
 
-  // FIXME: Invoke the registration function to register the plugin.
-  
-  return nullptr;
+  // For now, we expect the registration to simply allocate and return us a (C)
+  // extension instance.
+  //
+  // FIXME: This needs to be reworked to go through a C API.
+  auto *extension = registrationFn();
+  if (!extension) {
+    dlclose(handle);
+    return {};
+  }
+
+  extensions[path] = std::unique_ptr<BuildSystemExtension>(extension);
+  return extension;
 }
   
